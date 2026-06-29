@@ -25,20 +25,28 @@ typedef struct __jmp_buf_tag {
  || defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
 typedef jmp_buf sigjmp_buf;
+#ifndef __BPF__
 int sigsetjmp (sigjmp_buf, int) __setjmp_attr;
+#endif
 _Noreturn void siglongjmp (sigjmp_buf, int);
 #endif
 
 #if defined(_XOPEN_SOURCE) || defined(_GNU_SOURCE) \
  || defined(_BSD_SOURCE)
+#ifndef __BPF__
 int _setjmp (jmp_buf) __setjmp_attr;
+#endif
 _Noreturn void _longjmp (jmp_buf, int);
 #endif
 
+#ifndef __BPF__
 int setjmp (jmp_buf) __setjmp_attr;
+#endif
 _Noreturn void longjmp (jmp_buf, int);
 
+#ifndef __BPF__
 #define setjmp setjmp
+#endif
 
 #undef __setjmp_attr
 

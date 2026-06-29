@@ -128,8 +128,12 @@ static int child(void *args_vp)
 				}
 				break;
 			case FDOP_CHDIR:
-				ret = __syscall(SYS_chdir, op->path);
-				if (ret<0) goto fail;
+				/* BPF: SYS_chdir 不定义（与 fchdir 共用 handler 参数错位），
+				 * 用 chdir() 封装（src/unistd/bpf/chdir.c 走 open+fchdir+close）。
+				 * chdir() 失败只返回 -1 并设 errno，须转成 -errno 才能匹配下方
+				 * fail 路径（ret=-ret 后写回父进程作为 errno），否则父进程恒收
+				 * errno=EPERM。 */
+				if (chdir(op->path) < 0) { ret = -errno; goto fail; }
 				break;
 			case FDOP_FCHDIR:
 				ret = __syscall(SYS_fchdir, op->fd);

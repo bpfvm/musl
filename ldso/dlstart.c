@@ -135,16 +135,41 @@ hidden void _dlstart_c(size_t *sp, size_t *dynv)
 
 	rel = (void *)(base+dyn[DT_RELA]);
 	rel_size = dyn[DT_RELASZ];
+#ifdef __bpf__
+	/* BPF：处理全部 .rela.dyn 项（不只 IS_RELATIVE）。symtab 用于解析 sym!=0 的定义符号。
+	 * UND 符号（st_shndx==SHN_UNDEF）跳过，留给 stage-2（需 find_sym 跨模块解析）。
+	 * 注意 DT_SYMTAB 存的是相对 base 的 vaddr（PIE），须加 base 得运行时地址。 */
+	const Sym *syms = (void *)(base + dyn[DT_SYMTAB]);
+	for (; rel_size; rel+=3, rel_size-=3*sizeof(size_t)) {
+		size_t sym_idx = R_SYM(rel[1]);
+		size_t val;
+		if (sym_idx) {
+			Sym *s = syms + sym_idx;
+			if (s->st_shndx == SHN_UNDEF) continue;  // UND：留给 stage-2
+			val = base + s->st_value + rel[2];
+		} else {
+			val = base + rel[2];
+		}
+		unsigned char *rel_addr = (void *)(base + rel[0]);
+		if (R_TYPE(rel[1]) == R_BPF_64_64) {
+			*(uint32_t *)(rel_addr + 4) = (uint32_t)val;
+			*(uint32_t *)(rel_addr + 12) = (uint32_t)(val >> 32);
+		} else {
+			*(size_t *)rel_addr = val;
+		}
+	}
+#else
 	for (; rel_size; rel+=3, rel_size-=3*sizeof(size_t)) {
 		if (!IS_RELATIVE(rel[1], 0)) continue;
 		size_t *rel_addr = (void *)(base + rel[0]);
 		*rel_addr = base + rel[2];
 	}
+#endif
 
 	rel = (void *)(base+dyn[DT_RELR]);
 	rel_size = dyn[DT_RELRSZ];
 	size_t *relr_addr = 0;
-	for (; rel_size; rel++, rel_size-=sizeof(size_t)) {
+	for (; rel_size; rel_size-=sizeof(size_t)) {
 		if ((rel[0]&1) == 0) {
 			relr_addr = (void *)(base + rel[0]);
 			*relr_addr++ += base;

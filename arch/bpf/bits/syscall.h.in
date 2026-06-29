@@ -1,0 +1,448 @@
+/*
+ * BPF syscall 编号映射。
+ *
+ * 本 VM 不使用 Linux 原生 syscall 编号，而是用自定义的 BPF_CALL_* 家族
+ * （include/bpf_syscall.h：BPF_CALL_BASE=0x10000 + id）。__syscall(SYS_xxx,...)
+ * 会把 SYS_xxx 直接当作 call <imm> 的 imm，VM 的 do_syscall 按
+ * BPF_CALL_TO_ID 分发到 do_xxx。
+ *
+ * 因此这里把每个 syscall 号定义成对应的 BPF_CALL_xxx 值。Makefile
+ * (Makefile:101-103) 生成 bits/syscall.h 时用 sed 把 NR_ 前缀宏替换成 SYS_
+ * 追加到末尾，供 musl 内部 #ifdef SYS_xxx 探测使用（如 __set_thread_area.c
+ * 的 #ifdef SYS_set_thread_area）。
+ *
+ * 分四类：
+ *   1) VM 已实现（posix_syscall.cpp 的 switch）：映射到对应 BPF_CALL_*。参数
+ *      布局不同的同名 syscall 用独立 id（dup2/dup3、mkdir/mkdirat、readlink/
+ *      readlinkat、renameat/renameat2 各自独立 handler），避免共用 handler 读参
+ *      错位。
+ *   2) VM 未实现但 musl 引用：映射到 BPF_CALL_BASE 占位。包括 musl 直接
+ *      syscall() 调用的、经 socketcall_cp/__socketcall 宏（SYS_##name 拼接）
+ *      间接引用的网络系列、以及 musl #ifdef SYS_xxx 路径选择型（删除会改
+ *      变 musl 运行时分支，曾导致 test_sigstop 动态版 fork/信号路径回归）。
+ *      占位让 musl 编译通过；运行时若被调用，VM do_syscall default 返回
+ *      -ENOSYS，musl 据此降级或返回错误。
+ *   3) VM 未实现且 musl 完全不引用：不定义 NR 宏。用户代码 #ifdef SYS_xxx
+ *      探测会正确失败、syscall(SYS_xxx,...) 编译报错，避免误用（运行时静默
+ *      ENOSYS）。判定「完全不引用」须同时覆盖直接引用与宏间接引用，仅 grep
+ *      字面 SYS_xxx 会漏掉 socketcall 系列，需以「删除后 make 是否报 undeclared
+ *      identifier」为 ground truth。
+ *   4) 参数布局与 *at handler 不兼容的旧版别名（stat/lstat/fstat/fchmod/utime/
+ *      utimes/chdir/statx/tgkill 等）：不定义 NR 宏。它们与对应 *at id 参数个数
+ *      不同（如 stat 2参 vs fstatat 4参），共用 handler 会参数错位。libc 封装由
+ *      src 各模块 bpf/ 覆盖版用正确的 *at syscall 实现（见下方各段注释）。
+ *
+ * 注意：syscall 号定义必须用 NR_ 前缀宏（sed 据此生成 SYS_ 供 musl 探测），
+ * 但注释里不能写出该前缀的完整双下划线形式——sed 会把含该子串的注释行也
+ * 替换并追加到生成的 bits/syscall.h 末尾，造成乱码/重复定义。
+ */
+
+#ifndef BPF_CALL_BASE
+#include <bpf_syscall.h>
+#endif
+
+/* ============ 1) VM 已实现的 POSIX syscall ============ */
+#define __NR_mmap               BPF_CALL_MMAP
+#define __NR_munmap             BPF_CALL_MUNMAP
+#define __NR_mprotect           BPF_CALL_MPROTECT
+#define __NR_madvise            BPF_CALL_MADVISE
+#define __NR_openat             BPF_CALL_OPENAT
+#define __NR_read               BPF_CALL_READ
+#define __NR_write              BPF_CALL_WRITE
+#define __NR_readv              BPF_CALL_READV
+#define __NR_writev             BPF_CALL_WRITEV
+#define __NR_pread64            BPF_CALL_PREAD
+#define __NR_pwrite64           BPF_CALL_PWRITE
+#define __NR_close              BPF_CALL_CLOSE
+#define __NR_lseek              BPF_CALL_LSEEK
+#define __NR_dup                BPF_CALL_DUP
+#define __NR_dup3               BPF_CALL_DUP3
+#define __NR_pipe2              BPF_CALL_PIPE2
+#define __NR_fcntl              BPF_CALL_FCNTL
+#define __NR_ioctl              BPF_CALL_IOCTL
+#define __NR_getdents64         BPF_CALL_GETDENTS64
+#define __NR_unlinkat           BPF_CALL_UNLINKAT
+#define __NR_mkdirat            BPF_CALL_MKDIRAT
+#define __NR_symlinkat          BPF_CALL_SYMLINKAT
+#define __NR_linkat             BPF_CALL_LINKAT
+#define __NR_renameat2          BPF_CALL_RENAMEAT2
+#define __NR_vhangup            BPF_CALL_BASE
+#define __NR_readlinkat         BPF_CALL_READLINKAT
+#define __NR_getdents           BPF_CALL_GETDENTS64
+#define __NR_execveat           BPF_CALL_EXECVEAT
+#define __NR_exit               BPF_CALL_EXIT
+#define __NR_exit_group         BPF_CALL_EXIT_GROUP
+#define __NR_wait4              BPF_CALL_WAIT4
+#define __NR_waitid             BPF_CALL_WAITID
+#define __NR_getpid             BPF_CALL_GETPID
+#define __NR_getppid            BPF_CALL_GETPPID
+#define __NR_gettid             BPF_CALL_GETTID
+#define __NR_kill               BPF_CALL_KILL
+#define __NR_tkill              BPF_CALL_TKILL
+#define __NR_tgkill             BPF_CALL_TGKILL
+#define __NR_rt_sigaction       BPF_CALL_SIGACTION
+#define __NR_statx              BPF_CALL_STATX
+#define __NR_fchmodat           BPF_CALL_FCHMODAT
+#define __NR_fchmodat2          BPF_CALL_BASE
+#define __NR_mknod              BPF_CALL_BASE
+#define __NR_mknodat            BPF_CALL_BASE
+#define __NR_utimensat          BPF_CALL_UTIMENSAT
+#define __NR_faccessat          BPF_CALL_FACCESSAT
+#define __NR_faccessat2         BPF_CALL_FACCESSAT
+#define __NR_fchdir             BPF_CALL_FCHDIR
+#define __NR_getcwd             BPF_CALL_GETCWD
+#define __NR_umask              BPF_CALL_UMASK
+#define __NR_truncate           BPF_CALL_TRUNCATE
+#define __NR_ftruncate          BPF_CALL_FTRUNCATE
+#define __NR_clock_gettime      BPF_CALL_CLOCK_GETTIME
+#define __NR_nanosleep          BPF_CALL_NANOSLEEP
+#define __NR_getrandom          BPF_CALL_GETRANDOM
+#define __NR_sched_yield        BPF_CALL_SCHED_YIELD
+#define __NR_set_tid_address    BPF_CALL_SET_TID_ADDRESS
+#define __NR_set_robust_list    BPF_CALL_BASE
+#define __NR_get_robust_list    BPF_CALL_BASE
+#define __NR_rt_sigprocmask     BPF_CALL_SIGPROCMASK
+#define __NR_sigsetjmp          BPF_CALL_SIGSETJMP
+#define __NR_siglongjmp         BPF_CALL_SIGLONGJMP
+#define __NR_clone              BPF_CALL_CLONE
+#define __NR_setpgid            BPF_CALL_SETPGID
+#define __NR_getpgid            BPF_CALL_GETPGID
+#define __NR_getpgrp            BPF_CALL_GETPGRP
+#define __NR_setsid             BPF_CALL_SETSID
+#define __NR_getsid             BPF_CALL_GETSID
+#define __NR_futex              BPF_CALL_FUTEX
+
+/*
+ * thread pointer 设置（启动必需）。musl __init_tp -> __set_thread_area，失败即
+ * a_crash，这里必须落到 VM 实现了真正存 TP 的 do_set_tls（返回 0 成功）。
+ */
+#define __NR_set_thread_area    BPF_CALL_SET_TLS
+#define __NR_get_thread_area    BPF_CALL_GET_TLS
+
+/* ============ 2) VM 未实现：占位（让 #ifdef 分支编译过） ============ */
+/* 内存 */
+#define __NR_brk                BPF_CALL_BASE
+#define __NR_mremap             BPF_CALL_BASE
+#define __NR_mlock              BPF_CALL_BASE
+#define __NR_mlock2             BPF_CALL_BASE
+#define __NR_munlock            BPF_CALL_BASE
+#define __NR_mlockall           BPF_CALL_BASE
+#define __NR_munlockall         BPF_CALL_BASE
+#define __NR_mincore            BPF_CALL_BASE
+#define __NR_msync              BPF_CALL_BASE
+#define __NR_remap_file_pages   BPF_CALL_BASE
+
+/* 文件系统 / IO 扩展 */
+#define __NR_fallocate          BPF_CALL_BASE
+#define __NR_fadvise64          BPF_CALL_BASE
+#define __NR_readahead          BPF_CALL_BASE
+#define __NR_sendfile           BPF_CALL_BASE
+#define __NR_splice             BPF_CALL_BASE
+#define __NR_tee                BPF_CALL_BASE
+#define __NR_vmsplice           BPF_CALL_BASE
+#define __NR_preadv             BPF_CALL_BASE
+#define __NR_pwritev            BPF_CALL_BASE
+#define __NR_preadv2            BPF_CALL_BASE
+#define __NR_pwritev2           BPF_CALL_BASE
+#define __NR_copy_file_range    BPF_CALL_BASE
+#define __NR_sync               BPF_CALL_BASE
+#define __NR_fsync              BPF_CALL_BASE
+#define __NR_fdatasync          BPF_CALL_BASE
+#define __NR_syncfs             BPF_CALL_BASE
+#define __NR_sync_file_range    BPF_CALL_BASE
+#define __NR_mount              BPF_CALL_BASE
+#define __NR_umount2            BPF_CALL_BASE
+#define __NR_pivot_root         BPF_CALL_BASE
+#define __NR_chroot             BPF_CALL_BASE
+#define __NR_syslog             BPF_CALL_BASE
+#define __NR_statfs             BPF_CALL_BASE
+#define __NR_fstatfs            BPF_CALL_BASE
+#define __NR_statfs64           BPF_CALL_BASE
+#define __NR_fstatfs64          BPF_CALL_BASE
+#define __NR_flock              BPF_CALL_BASE
+#define __NR_quotactl           BPF_CALL_BASE
+#define __NR_name_to_handle_at  BPF_CALL_BASE
+#define __NR_open_by_handle_at  BPF_CALL_BASE
+
+/* xattr */
+#define __NR_setxattr           BPF_CALL_BASE
+#define __NR_lsetxattr          BPF_CALL_BASE
+#define __NR_fsetxattr          BPF_CALL_BASE
+#define __NR_getxattr           BPF_CALL_BASE
+#define __NR_lgetxattr          BPF_CALL_BASE
+#define __NR_fgetxattr          BPF_CALL_BASE
+#define __NR_listxattr          BPF_CALL_BASE
+#define __NR_llistxattr         BPF_CALL_BASE
+#define __NR_flistxattr         BPF_CALL_BASE
+#define __NR_removexattr        BPF_CALL_BASE
+#define __NR_lremovexattr       BPF_CALL_BASE
+#define __NR_fremovexattr       BPF_CALL_BASE
+
+/* 进程 / 线程 / 信号 */
+#define __NR_unshare            BPF_CALL_BASE
+#define __NR_setns              BPF_CALL_BASE
+#define __NR_getcpu             BPF_CALL_BASE
+#define __NR_sched_setaffinity  BPF_CALL_BASE
+#define __NR_sched_getaffinity  BPF_CALL_BASE
+#define __NR_sched_setscheduler BPF_CALL_BASE
+#define __NR_sched_getscheduler BPF_CALL_BASE
+#define __NR_sched_setparam     BPF_CALL_BASE
+#define __NR_sched_getparam     BPF_CALL_BASE
+#define __NR_sched_get_priority_max BPF_CALL_BASE
+#define __NR_sched_get_priority_min BPF_CALL_BASE
+#define __NR_sched_rr_get_interval BPF_CALL_BASE
+#define __NR_sched_rr_get_interval_time64 BPF_CALL_BASE
+#define __NR_setpriority        BPF_CALL_BASE
+#define __NR_getpriority        BPF_CALL_BASE
+#define __NR_setuid             BPF_CALL_BASE
+#define __NR_setgid             BPF_CALL_BASE
+#define __NR_setreuid           BPF_CALL_BASE
+#define __NR_setregid           BPF_CALL_BASE
+#define __NR_setresuid          BPF_CALL_BASE
+#define __NR_getresuid          BPF_CALL_BASE
+#define __NR_setresgid          BPF_CALL_BASE
+#define __NR_getresgid          BPF_CALL_BASE
+#define __NR_setfsuid           BPF_CALL_BASE
+#define __NR_setfsgid           BPF_CALL_BASE
+#define __NR_getuid             BPF_CALL_GETUID
+#define __NR_geteuid            BPF_CALL_GETEUID
+#define __NR_getgid             BPF_CALL_GETGID
+#define __NR_getegid            BPF_CALL_GETEGID
+#define __NR_getgroups          BPF_CALL_GETGROUPS
+#define __NR_setgroups          BPF_CALL_BASE
+#define __NR_chown              BPF_CALL_BASE
+#define __NR_fchown             BPF_CALL_BASE
+#define __NR_lchown             BPF_CALL_BASE
+#define __NR_fchownat           BPF_CALL_BASE
+#define __NR_ptrace             BPF_CALL_BASE
+#define __NR_arch_prctl         BPF_CALL_BASE
+#define __NR_prctl              BPF_CALL_BASE
+#define __NR_capget             BPF_CALL_BASE
+#define __NR_capset             BPF_CALL_BASE
+#define __NR_personality        BPF_CALL_BASE
+
+/* 信号扩展 */
+#define __NR_rt_sigpending      BPF_CALL_BASE
+#define __NR_rt_sigqueueinfo    BPF_CALL_BASE
+#define __NR_rt_sigtimedwait    BPF_CALL_BASE
+#define __NR_rt_sigsuspend      BPF_CALL_BASE
+#define __NR_sigaltstack        BPF_CALL_BASE
+#define __NR_pause              BPF_CALL_BASE
+
+/* 时间 / 定时器 */
+#define __NR_clock_getres       BPF_CALL_BASE
+#define __NR_clock_nanosleep    BPF_CALL_BASE
+#define __NR_clock_settime      BPF_CALL_BASE
+#define __NR_clock_adjtime      BPF_CALL_BASE
+#define __NR_clock_adjtime64    BPF_CALL_BASE
+#define __NR_setitimer          BPF_CALL_BASE
+#define __NR_getitimer          BPF_CALL_BASE
+#define __NR_timer_create       BPF_CALL_BASE
+#define __NR_timer_settime      BPF_CALL_BASE
+#define __NR_timer_gettime      BPF_CALL_BASE
+#define __NR_timer_delete       BPF_CALL_BASE
+#define __NR_timer_getoverrun   BPF_CALL_BASE
+#define __NR_timerfd_create     BPF_CALL_BASE
+#define __NR_timerfd_settime    BPF_CALL_BASE
+#define __NR_timerfd_gettime    BPF_CALL_BASE
+#define __NR_settimeofday       BPF_CALL_BASE
+#define __NR_gettimeofday       BPF_CALL_BASE
+#define __NR_times              BPF_CALL_BASE
+
+/* Network */
+#define __NR_socket             BPF_CALL_SOCKET
+#define __NR_socketpair         BPF_CALL_SOCKETPAIR
+#define __NR_bind               BPF_CALL_BIND
+#define __NR_listen             BPF_CALL_LISTEN
+#define __NR_connect            BPF_CALL_CONNECT
+#define __NR_accept4            BPF_CALL_ACCEPT4
+#define __NR_getsockname        BPF_CALL_GETSOCKNAME
+#define __NR_getpeername        BPF_CALL_GETPEERNAME
+#define __NR_sendto             BPF_CALL_SENDTO
+#define __NR_recvfrom           BPF_CALL_RECVFROM
+#define __NR_sendmsg            BPF_CALL_SENDMSG
+#define __NR_recvmsg            BPF_CALL_RECVMSG
+#define __NR_setsockopt         BPF_CALL_SETSOCKOPT
+#define __NR_getsockopt         BPF_CALL_GETSOCKOPT
+#define __NR_shutdown           BPF_CALL_SHUTDOWN
+#define __NR_sendmmsg           BPF_CALL_BASE
+#define __NR_recvmmsg           BPF_CALL_BASE
+
+/* poll / epoll / select.
+ * Implemented: epoll_create1/epoll_ctl/epoll_pwait (src/posix/socket.cpp),
+ * pselect6 (src/posix/fd_ops.cpp；第 5 参当 timespec*）。
+ */
+#define __NR_poll               BPF_CALL_POLL
+#define __NR_ppoll              BPF_CALL_BASE
+#define __NR_ppoll_time64       BPF_CALL_BASE
+#define __NR_pselect6           BPF_CALL_PSELECT6
+#define __NR_pselect6_time64    BPF_CALL_PSELECT6
+#define __NR_select             BPF_CALL_BASE
+#define __NR_epoll_create1      BPF_CALL_EPOLL_CREATE1
+#define __NR_epoll_ctl          BPF_CALL_EPOLL_CTL
+#define __NR_epoll_pwait        BPF_CALL_EPOLL_PWAIT
+
+/* inotify / fanotify / eventfd / signalfd */
+#define __NR_inotify_init       BPF_CALL_BASE
+#define __NR_inotify_init1      BPF_CALL_BASE
+#define __NR_inotify_add_watch  BPF_CALL_BASE
+#define __NR_inotify_rm_watch   BPF_CALL_BASE
+#define __NR_fanotify_init      BPF_CALL_BASE
+#define __NR_fanotify_mark      BPF_CALL_BASE
+#define __NR_eventfd2           BPF_CALL_BASE
+#define __NR_signalfd4          BPF_CALL_SIGNALFD4
+
+/* POSIX IPC（消息队列 / 信号量 / 共享内存） */
+#define __NR_mq_open            BPF_CALL_BASE
+#define __NR_mq_unlink          BPF_CALL_BASE
+#define __NR_mq_timedsend       BPF_CALL_BASE
+#define __NR_mq_timedreceive    BPF_CALL_BASE
+#define __NR_mq_timedsend_time64 BPF_CALL_BASE
+#define __NR_mq_timedreceive_time64 BPF_CALL_BASE
+#define __NR_mq_notify          BPF_CALL_BASE
+#define __NR_mq_getsetattr      BPF_CALL_BASE
+#define __NR_semget             BPF_CALL_BASE
+#define __NR_semctl             BPF_CALL_BASE
+#define __NR_semop              BPF_CALL_BASE
+#define __NR_semtimedop         BPF_CALL_BASE
+#define __NR_msgget             BPF_CALL_BASE
+#define __NR_msgctl             BPF_CALL_BASE
+#define __NR_msgrcv             BPF_CALL_BASE
+#define __NR_msgsnd             BPF_CALL_BASE
+#define __NR_shmget             BPF_CALL_BASE
+#define __NR_shmctl             BPF_CALL_BASE
+#define __NR_shmat              BPF_CALL_BASE
+#define __NR_shmdt              BPF_CALL_BASE
+
+/* System V / Linux 特性 */
+#define __NR_sysinfo            BPF_CALL_BASE
+#define __NR_uname              BPF_CALL_BASE
+#define __NR_sethostname        BPF_CALL_BASE
+#define __NR_setdomainname      BPF_CALL_BASE
+#define __NR_getrlimit          BPF_CALL_BASE
+#define __NR_setrlimit          BPF_CALL_BASE
+#define __NR_getrusage          BPF_CALL_BASE
+#define __NR_prlimit64          BPF_CALL_BASE
+#define __NR_ugetrlimit         BPF_CALL_BASE
+#define __NR_membarrier         BPF_CALL_BASE
+#define __NR_memfd_create       BPF_CALL_BASE
+#define __NR_init_module        BPF_CALL_BASE
+#define __NR_delete_module      BPF_CALL_BASE
+#define __NR_acct               BPF_CALL_BASE
+#define __NR_swapon             BPF_CALL_BASE
+#define __NR_swapoff            BPF_CALL_BASE
+#define __NR_process_vm_readv   BPF_CALL_BASE
+#define __NR_process_vm_writev  BPF_CALL_BASE
+#define __NR_reboot             BPF_CALL_BASE
+
+#ifndef syscall
+
+/* 这个 push 故意不配对 pop（直到 TU 末尾）。
+ * -Wint-conversion 在 clang 16+ / C2x 默认是 error。BPF 上 syscall 是宏，
+ * 形参全是 long（见下 __bpf_syscallN），用户写 `syscall(SYS_x, &ptr)` 传指针
+ * 会在调用点触发指针→long 转换。pragma 是词法作用域，必须覆盖到这些调用点，
+ * 故不能在本头结束时 pop——否则抑制只保护下面的 inline 函数体（函数指针强转），
+ * 保护不到用户代码里 `syscall(...)` 宏展开后的实参→形参转换。BPF 是 64 位统一
+ * 整数 ABI，指针与 long 同宽，该转换无损，压成 warning 是安全的。 */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#pragma GCC diagnostic ignored "-Wint-conversion"
+
+static inline long __bpf_syscall0(unsigned long call)
+{
+    return ((long (*)(void))call)();
+}
+
+static inline long __bpf_syscall1(unsigned long call, long a)
+{
+    return ((long (*)(long))call)(a);
+}
+
+static inline long __bpf_syscall2(unsigned long call, long a, long b)
+{
+    return ((long (*)(long, long))call)(a, b);
+}
+
+static inline long __bpf_syscall3(unsigned long call, long a, long b, long c)
+{
+    return ((long (*)(long, long, long))call)(a, b, c);
+}
+
+static inline long __bpf_syscall4(unsigned long call, long a, long b, long c, long d)
+{
+    return ((long (*)(long, long, long, long))call)(a, b, c, d);
+}
+
+static inline long __bpf_syscall5(unsigned long call, long a, long b, long c, long d, long e)
+{
+    return ((long (*)(long, long, long, long, long))call)(a, b, c, d, e);
+}
+
+static inline long __bpf_syscall6(unsigned long call, long a, long b, long c, long d, long e, long f)
+{
+    return ((long (*)(long, long, long, long, long, long))call)(a, b, c, d, e, f);
+}
+
+/* C++ 指针重载：上面的 -Wint-conversion pragma 在 C 下能把"指针→long 隐式转换"压成
+ * 警告，但 C++ 里这是硬错误（不是 warning，pragma 抑制不了）。C++ 代码（如 libc++abi
+ * 的 cxa_guard_impl.h 用 syscall(SYS_futex, int*, ...) 传指针）需这些重载才能编。
+ * 仅 C++ 启用（C 不支持函数重载）。任一参数为 void* 时命中对应重载，指针经 intptr_t
+ * 转 long（BPF 64 位统一整数 ABI，无损，与原 pragma 意图一致）。 */
+#ifdef __cplusplus
+#include <stdint.h>
+static inline long __bpf_syscall1(unsigned long call, void *a)
+{ return __bpf_syscall1(call, (long)(intptr_t)a); }
+static inline long __bpf_syscall2(unsigned long call, void *a, long b)
+{ return __bpf_syscall2(call, (long)(intptr_t)a, b); }
+static inline long __bpf_syscall2(unsigned long call, long a, void *b)
+{ return __bpf_syscall2(call, a, (long)(intptr_t)b); }
+static inline long __bpf_syscall3(unsigned long call, void *a, long b, long c)
+{ return __bpf_syscall3(call, (long)(intptr_t)a, b, c); }
+static inline long __bpf_syscall3(unsigned long call, long a, void *b, long c)
+{ return __bpf_syscall3(call, a, (long)(intptr_t)b, c); }
+static inline long __bpf_syscall3(unsigned long call, long a, long b, void *c)
+{ return __bpf_syscall3(call, a, b, (long)(intptr_t)c); }
+static inline long __bpf_syscall4(unsigned long call, void *a, long b, long c, long d)
+{ return __bpf_syscall4(call, (long)(intptr_t)a, b, c, d); }
+static inline long __bpf_syscall4(unsigned long call, long a, void *b, long c, long d)
+{ return __bpf_syscall4(call, a, (long)(intptr_t)b, c, d); }
+static inline long __bpf_syscall4(unsigned long call, long a, long b, void *c, long d)
+{ return __bpf_syscall4(call, a, b, (long)(intptr_t)c, d); }
+static inline long __bpf_syscall4(unsigned long call, long a, long b, long c, void *d)
+{ return __bpf_syscall4(call, a, b, c, (long)(intptr_t)d); }
+static inline long __bpf_syscall5(unsigned long call, void *a, long b, long c, long d, long e)
+{ return __bpf_syscall5(call, (long)(intptr_t)a, b, c, d, e); }
+static inline long __bpf_syscall5(unsigned long call, long a, void *b, long c, long d, long e)
+{ return __bpf_syscall5(call, a, (long)(intptr_t)b, c, d, e); }
+static inline long __bpf_syscall5(unsigned long call, long a, long b, void *c, long d, long e)
+{ return __bpf_syscall5(call, a, b, (long)(intptr_t)c, d, e); }
+static inline long __bpf_syscall5(unsigned long call, long a, long b, long c, void *d, long e)
+{ return __bpf_syscall5(call, a, b, c, (long)(intptr_t)d, e); }
+static inline long __bpf_syscall5(unsigned long call, long a, long b, long c, long d, void *e)
+{ return __bpf_syscall5(call, a, b, c, d, (long)(intptr_t)e); }
+static inline long __bpf_syscall6(unsigned long call, void *a, long b, long c, long d, long e, long f)
+{ return __bpf_syscall6(call, (long)(intptr_t)a, b, c, d, e, f); }
+static inline long __bpf_syscall6(unsigned long call, long a, void *b, long c, long d, long e, long f)
+{ return __bpf_syscall6(call, a, (long)(intptr_t)b, c, d, e, f); }
+static inline long __bpf_syscall6(unsigned long call, long a, long b, void *c, long d, long e, long f)
+{ return __bpf_syscall6(call, a, b, (long)(intptr_t)c, d, e, f); }
+static inline long __bpf_syscall6(unsigned long call, long a, long b, long c, void *d, long e, long f)
+{ return __bpf_syscall6(call, a, b, c, (long)(intptr_t)d, e, f); }
+static inline long __bpf_syscall6(unsigned long call, long a, long b, long c, long d, void *e, long f)
+{ return __bpf_syscall6(call, a, b, c, d, (long)(intptr_t)e, f); }
+static inline long __bpf_syscall6(unsigned long call, long a, long b, long c, long d, long e, void *f)
+{ return __bpf_syscall6(call, a, b, c, d, e, (long)(intptr_t)f); }
+#endif
+
+/* 不 pop：见上面 push 处注释 */
+
+/* 数参数个数（0..6），把 syscall(ID, args...) 分发到 __bpf_syscallN(ID, args...) */
+#define ___bpf_syscall_nth(_, _1, _2, _3, _4, _5, _6, N, ...) N
+#define ___bpf_syscall_narg(...) \
+    ___bpf_syscall_nth(_, ##__VA_ARGS__, 6, 5, 4, 3, 2, 1, 0)
+#define ___bpf_syscall_cat_x(a, b) a##b
+#define ___bpf_syscall_cat(a, b) ___bpf_syscall_cat_x(a, b)
+#define syscall(call, ...) \
+    ___bpf_syscall_cat(__bpf_syscall, ___bpf_syscall_narg(__VA_ARGS__))(call, ##__VA_ARGS__)
+
+#endif /* !syscall */

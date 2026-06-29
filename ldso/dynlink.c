@@ -467,7 +467,16 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 		case REL_SYMBOLIC:
 		case REL_GOT:
 		case REL_PLT:
+#ifdef __bpf__
+			/* BPF：sym_idx=0 是本模块内部引用（bpfvm-ld 用 NULL 符号 +
+			 * addend=符号 vaddr 发射），需 base+addend，与 REL_SYM_OR_REL 一致。
+			 * 不修则 ldso 的 reloc_all(&ldso) 会把 VM 已正确重定位的 .data 槽
+			 * （如 error 函数指针 = error_noop）改写成 0+addend，导致后续 error()
+			 * 间接调用跳到未重定位地址而崩。主程序/依赖 .rela.dyn 同理依赖此修正。 */
+			*reloc_addr = sym ? sym_val + addend : (size_t)base + addend;
+#else
 			*reloc_addr = sym_val + addend;
+#endif
 			break;
 		case REL_USYMBOLIC:
 			memcpy(reloc_addr, &(size_t){sym_val + addend}, sizeof(size_t));
@@ -476,8 +485,20 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 			*reloc_addr = (size_t)base + addend;
 			break;
 		case REL_SYM_OR_REL:
+#ifdef __bpf__
+			/* BPF lddw 指令（R_BPF_64_64，type 1）：64 位立即数拆写进 16 字节指令对的
+			 * 两个 imm 字段（reloc_addr+4 低 32 位，reloc_addr+12 高 32 位），不能像
+			 * 默认分支那样单次写 reloc_addr[0..7]（会覆盖 opcode 字节 0-3）。sym_idx=0
+			 * 时 addend 已含符号地址（V=base+addend），否则跨模块（V=sym_val+addend）。 */
+			{
+				size_t v = sym ? sym_val + addend : (size_t)base + addend;
+				*(uint32_t *)((char *)reloc_addr + 4) = (uint32_t)v;
+				*(uint32_t *)((char *)reloc_addr + 12) = (uint32_t)(v >> 32);
+			}
+#else
 			if (sym) *reloc_addr = sym_val + addend;
 			else *reloc_addr = (size_t)base + addend;
+#endif
 			break;
 		case REL_COPY:
 			memcpy(reloc_addr, (void *)sym_val, sym->st_size);

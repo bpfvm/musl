@@ -401,7 +401,19 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 	}
 
 	for (; rel_size; rel+=stride, rel_size-=stride*sizeof(size_t)) {
+#ifdef __bpf__
+		/* BPF 无独立 RELATIVE 重定位类型：sym_idx=0 + addend 的 type1（lddw 双槽）
+		 * 与 type2（数据指针）都是 base 相对语义，dlstart stage-1 已应用，重跑必须
+		 * 跳过。ldso 的重跑发生在 __dls3 的 reloc_all(app.next)：load_deps 解析
+		 * DT_NEEDED libc.so 时 is_self 把 ldso 挂到链尾，而 __dls2 已把 relocated
+		 * 清零。若重跑，.data 槽被重置回初始值，覆盖运行期写入——如 __dls3 的
+		 * error = error_impl 被打回 error_noop，此后 dlopen/dlsym 失败路径全部
+		 * 静默，dlerror() 恒为 NULL。 */
+		if (skip_relative && (IS_RELATIVE(rel[1], dso->syms) ||
+		    (R_TYPE(rel[1]) == REL_SYMBOLIC && !R_SYM(rel[1])))) continue;
+#else
 		if (skip_relative && IS_RELATIVE(rel[1], dso->syms)) continue;
+#endif
 		type = R_TYPE(rel[1]);
 		if (type == REL_NONE) continue;
 		reloc_addr = laddr(dso, rel[0]);
@@ -467,7 +479,15 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 		case REL_SYMBOLIC:
 		case REL_GOT:
 		case REL_PLT:
+#ifdef __bpf__
+			/* BPF：sym_idx=0 是本模块内部引用（bpfvm-ld 用 NULL 符号 +
+			 * addend=符号 vaddr 发射），值 = base+addend，与 REL_SYM_OR_REL 一致
+			 * （通用式写 sym_val+addend，sym=0 时 sym_val=0，是错误地址）。主程序/
+			 * 依赖/dlopen 库的 sym0 项在此应用。 */
+			*reloc_addr = sym ? sym_val + addend : (size_t)base + addend;
+#else
 			*reloc_addr = sym_val + addend;
+#endif
 			break;
 		case REL_USYMBOLIC:
 			memcpy(reloc_addr, &(size_t){sym_val + addend}, sizeof(size_t));
@@ -476,8 +496,20 @@ static void do_relocs(struct dso *dso, size_t *rel, size_t rel_size, size_t stri
 			*reloc_addr = (size_t)base + addend;
 			break;
 		case REL_SYM_OR_REL:
+#ifdef __bpf__
+			/* BPF lddw 指令（R_BPF_64_64，type 1）：64 位立即数拆写进 16 字节指令对的
+			 * 两个 imm 字段（reloc_addr+4 低 32 位，reloc_addr+12 高 32 位），不能像
+			 * 默认分支那样单次写 reloc_addr[0..7]（会覆盖 opcode 字节 0-3）。sym_idx=0
+			 * 时 addend 已含符号地址（V=base+addend），否则跨模块（V=sym_val+addend）。 */
+			{
+				size_t v = sym ? sym_val + addend : (size_t)base + addend;
+				*(uint32_t *)((char *)reloc_addr + 4) = (uint32_t)v;
+				*(uint32_t *)((char *)reloc_addr + 12) = (uint32_t)(v >> 32);
+			}
+#else
 			if (sym) *reloc_addr = sym_val + addend;
 			else *reloc_addr = (size_t)base + addend;
+#endif
 			break;
 		case REL_COPY:
 			memcpy(reloc_addr, (void *)sym_val, sym->st_size);

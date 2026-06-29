@@ -58,6 +58,43 @@ hidden long __syscall_ret(unsigned long),
 #define __syscall_cp(...) __SYSCALL_DISP(__syscall_cp,__VA_ARGS__)
 #define syscall_cp(...) __syscall_ret(__syscall_cp(__VA_ARGS__))
 
+#ifdef __bpf__
+/*
+ * BPF 移植：把可取消 syscall 路径（syscall_cp / __syscall_cp）折叠回普通 syscall。
+ *
+ * 标准 musl 的 syscall_cp 走 __syscall_cp → __syscall_cp_c（pthread_cancel.c 中
+ * 的非内联函数）→ __syscall_cp_asm（arch 汇编）。这条链上 nr 作为函数参数逐层
+ * 传递，到最底层已是运行时变量，clang 无法把 `((long(*)(...))nr)(...)` 折叠成
+ * 常量 syscall 形式 `call <imm>`（src_reg=0），只能 lower 成 BPF 不支持的间接
+ * 调用（src_reg=1，运行时崩溃）。
+ *
+ * 这里把 __syscall_cpN 重定义为直接走 __syscallN（arch/bpf/syscall_arch.h 中的
+ * static inline，nr 保持常量），让 clang 正确 lower 出 src_reg=0 的 call。
+ *
+ * 位置关键：必须紧接在 __syscall_cpN/__syscall_cp 原定义之后（#undef 才合法），
+ * 且必须在下方 __alt_socketcall 之前——否则 __alt_socketcall 这个 inline 函数
+ * 体内的 __syscall_cp 走的仍是折叠前的原始定义（→ __syscall_cp_c 真函数 → 间接
+ * 调用）。网络函数（sendto/recvfrom/connect/accept/...）都经 __alt_socketcall，
+ * 只有折叠块在它之前，才能让它们也走常量折叠路径。挪到文件末尾会漏掉这一条。
+ */
+#undef __syscall_cp0
+#undef __syscall_cp1
+#undef __syscall_cp2
+#undef __syscall_cp3
+#undef __syscall_cp4
+#undef __syscall_cp5
+#undef __syscall_cp6
+#undef __syscall_cp
+#define __syscall_cp0(n) __syscall0(n)
+#define __syscall_cp1(n,a) __syscall1(n,__scc(a))
+#define __syscall_cp2(n,a,b) __syscall2(n,__scc(a),__scc(b))
+#define __syscall_cp3(n,a,b,c) __syscall3(n,__scc(a),__scc(b),__scc(c))
+#define __syscall_cp4(n,a,b,c,d) __syscall4(n,__scc(a),__scc(b),__scc(c),__scc(d))
+#define __syscall_cp5(n,a,b,c,d,e) __syscall5(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e))
+#define __syscall_cp6(n,a,b,c,d,e,f) __syscall6(n,__scc(a),__scc(b),__scc(c),__scc(d),__scc(e),__scc(f))
+#define __syscall_cp(...) __SYSCALL_DISP(__syscall,__VA_ARGS__)
+#endif
+
 static inline long __alt_socketcall(int sys, int sock, int cp, syscall_arg_t a, syscall_arg_t b, syscall_arg_t c, syscall_arg_t d, syscall_arg_t e, syscall_arg_t f)
 {
 	long r;

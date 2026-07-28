@@ -42,6 +42,15 @@ _Noreturn void exit(int code)
 
 	__funcs_on_exit();
 	__libc_exit_fini();
+#ifdef __bpf__
+	/* BPF 移植：主线程的 thread_local 析构。主线程不走 __pthread_tsd_run_dtors
+	 *（__pthread_exit 对 self->next==self 转 exit(0)，见 pthread_create.c），故在此
+	 * 显式触发一次。放在 __libc_exit_fini（全局 cxa_atexit dtor）之后，与 Itanium ABI
+	 *「全局对象先于主线程 thread_local 析构」一致。子线程已各自在 __pthread_tsd_run_dtors
+	 * 跑过，这里对无注册的线程是 no-op。实现见 src/thread/bpf/cxa_thread_atexit.c
+	 *（BPF 用 emutls 模拟 thread_local，需自行注册每线程析构；上游 musl 无此机制）。 */
+	__pthread_run_cxa_dtors();
+#endif
 	__stdio_exit();
 	_Exit(code);
 }

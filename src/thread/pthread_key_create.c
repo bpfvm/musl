@@ -78,6 +78,16 @@ void __pthread_tsd_run_dtors()
 {
 	pthread_t self = __pthread_self();
 	int i, j;
+
+#ifdef __bpf__
+	/* BPF 移植：先跑 thread_local 的 C++ 析构（__cxa_thread_atexit 注册的链），再跑
+	 * pthread_key destructor——C++ ABI 要求 thread_local dtor 早于 pthread_key dtor；
+	 * emutls 的副本内存由 pthread_key destructor（emutls_slots_destructor）free，故此处
+	 * 副本仍有效。主线程不经此路径（__pthread_exit 对 self->next==self 转 exit(0)），由
+	 * exit() 触发。实现见 src/thread/bpf/cxa_thread_atexit.c（BPF 用 emutls 模拟
+	 * thread_local，需自行注册每线程析构；上游 musl 无此机制）。 */
+	__pthread_run_cxa_dtors();
+#endif
 	for (j=0; self->tsd_used && j<PTHREAD_DESTRUCTOR_ITERATIONS; j++) {
 		__pthread_rwlock_rdlock(&key_lock);
 		self->tsd_used = 0;

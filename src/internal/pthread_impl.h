@@ -149,6 +149,10 @@ hidden void __testcancel();
 hidden void __do_cleanup_push(struct __ptcb *);
 hidden void __do_cleanup_pop(struct __ptcb *);
 hidden void __pthread_tsd_run_dtors();
+#ifdef __bpf__
+/* BPF 移植：thread_local 每线程析构（emutls 模拟）。定义在 src/thread/bpf/cxa_thread_atexit.c。 */
+hidden void __pthread_run_cxa_dtors();
+#endif
 
 hidden void __pthread_key_delete_synccall(void (*)(void *), void *);
 hidden int __pthread_key_delete_impl(pthread_key_t);
